@@ -1006,9 +1006,9 @@ int Initialise(tFleshConfig *config) {
   CCTKi_AddGH(config, 0, cctkGH);
 
   // Check presync mode
-  if (!CCTK_EQUALS(presync_mode, "mixed-error"))
+  if (!CCTK_EQUALS(presync_mode, "mixed-error") && !CCTK_EQUALS(presync_mode, "presync-only"))
     CCTK_ERROR(
-        "CarpetX currently requires Cactus::presync_mode = \"mixed-error\"");
+        "CarpetX currently requires Cactus::presync_mode = \"mixed-error\" or \"presyc-only\"");
 
   // Initialise iteration and time
   cctkGH->cctk_iteration = 0;
@@ -1716,6 +1716,27 @@ int CallFunction(void *function, cFunctionData *restrict attribute,
 
   assert(active_levels);
 
+  if(CCTK_EQUALS(presync_mode, "presync-only")) {
+    const vector<clause_t> &reads = decode_clauses(attribute, rdwr_t::read);
+    std::set<int> sync_set;
+    for (const auto &rd : reads) {
+      if (CCTK_GroupTypeI(rd.gi) == CCTK_GF) {
+
+        active_levels->loop([&](const auto &restrict leveldata) {
+          const auto &restrict groupdata = *leveldata.groupdata.at(rd.gi);
+          const valid_t &need = rd.valid;
+          valid_t have = groupdata.valid.at(rd.tl).at(rd.vi).get();
+          if(need.valid_ghosts && !have.valid_ghosts && have.valid_int)
+            sync_set.insert(rd.gi);
+        });
+      }
+    }
+    if(sync_set.size() > 0) {
+      std::vector<int> sync_vec(sync_set.begin(), sync_set.end());
+      SyncGroupsByDirI(cctkGH, sync_vec.size(), sync_vec.data(), nullptr);
+    }
+  }
+
   // Check whether input variables have valid data
   {
     const vector<clause_t> &reads = decode_clauses(attribute, rdwr_t::read);
@@ -2005,6 +2026,15 @@ int CallFunction(void *function, cFunctionData *restrict attribute,
 
 bool sync_active = false; // Catch recursive calls
 
+struct mark_sync_active {
+    mark_sync_active() {
+        sync_active = true;
+    }
+    ~mark_sync_active() {
+        sync_active = false;
+    }
+};
+
 int SyncGroupsByDirI(const cGH *restrict cctkGH, int numgroups,
                      const int *groups0, const int *directions) {
   DECLARE_CCTK_PARAMETERS;
@@ -2015,7 +2045,7 @@ int SyncGroupsByDirI(const cGH *restrict cctkGH, int numgroups,
     CCTK_ERROR("Recursive call to SyncGroupsByDirI. Maybe you are syncing grid "
                "functions in the \"restrict\" bin while the parameter "
                "\"restrict_during_sync\" is true?");
-  sync_active = true;
+  mark_sync_active marked;
 
   static Timer timer("Sync");
   Interval interval(timer);
@@ -2047,6 +2077,38 @@ int SyncGroupsByDirI(const cGH *restrict cctkGH, int numgroups,
     if (gi == gi_regrid_error)
       continue;
     groups.push_back(gi);
+  }
+
+  // Skip groups that have valid ghosts and boundaries
+  if(CCTK_EQUALS(presync_mode, "presync-only")) {
+    active_levels->loop([&](auto &restrict leveldata) {
+      vector<int> new_groups;
+      for (const int gi : groups) {
+        auto &restrict groupdata = *leveldata.groupdata.at(gi);
+        bool need_sync = false;
+        for(int tl=0; tl < groupdata.valid.size(); tl++) {
+          if(need_sync) break;
+          auto& timeleveldata = groupdata.valid.at(tl);
+          for(int vi=0; vi < timeleveldata.size(); vi++) {
+            if(need_sync) break;
+            valid_t have = groupdata.valid.at(tl).at(vi).get();
+            if(!have.valid_ghosts || !have.valid_outer) {
+                need_sync = true;
+            }
+          }
+        }
+        if(need_sync) {
+          new_groups.push_back(gi);
+        } else {
+          std::cout << ">> skipping: " << gi << std::endl;
+        }
+      }
+      groups = new_groups;
+    });
+    if(groups.size() == 0) {
+      std::cout << ">> skipping all!" << std::endl;
+      return 0;
+    }
   }
 
   if (restrict_during_sync) {
@@ -2234,7 +2296,6 @@ int SyncGroupsByDirI(const cGH *restrict cctkGH, int numgroups,
   tasks2.clear();
 
   assert(sync_active);
-  sync_active = false;
 
   return numgroups; // number of groups synchronized
 }
