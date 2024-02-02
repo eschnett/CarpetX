@@ -1,1 +1,5 @@
 # Parameter definitions for thorn Derivs
+CCTK_REAL epsdiss "Dissipation coefficient <arXiv:gr-qc/0610128>" STEERABLE=always
+{
+  0.0:* :: ""
+} 0.32
