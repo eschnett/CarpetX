@@ -1,6 +1,7 @@
 // TODO: Don't include files from other thorns; create a proper interface
 #include "../../CarpetX/src/driver.hxx"
 #include "../../CarpetX/src/schedule.hxx"
+#include "../../CarpetX/src/timer.hxx"
 
 #include <cctk.h>
 #include <cctk_Parameters.h>
@@ -26,6 +27,7 @@ static inline int omp_get_max_threads() { return 1; }
 #include <functional>
 #include <limits>
 #include <memory>
+#include <optional>
 #include <sstream>
 #include <string>
 #include <tuple>
@@ -118,6 +120,9 @@ struct statecomp_t {
                       const vector<const statecomp_t *> &srcs,
                       const valid_t where);
 };
+
+template <std::size_t N> using reals = std::array<CCTK_REAL, N>;
+template <std::size_t N> using states = std::array<const statecomp_t *, N>;
 
 ////////////////////////////////////////////////////////////////////////////////
 
@@ -651,8 +656,14 @@ extern "C" void ODESolvers_Solve(CCTK_ARGUMENTS) {
     CCTK_VINFO("Integrator is %s", method);
   did_output = true;
 
+  static Timer timer("ODESolvers::Solve");
+  Interval interval(timer);
+
   const CCTK_REAL dt = cctk_delta_time;
   const int tl = 0;
+
+  static Timer timer_setup("ODESolvers::Solve::setup");
+  std::optional<Interval> interval_setup(timer_setup);
 
   statecomp_t var, rhs;
   std::vector<int> var_groups, rhs_groups, dep_groups;
@@ -720,10 +731,55 @@ extern "C" void ODESolvers_Solve(CCTK_ARGUMENTS) {
     assert(std::find(var_groups.begin(), var_groups.end(), gi) ==
            var_groups.end());
 
-  statecomp_t::init_tmp_mfabs();
+  interval_setup.reset();
+
+  {
+    static Timer timer_alloc_temps("ODESolvers::Solve::alloc_temps");
+    Interval interval_alloc_temps(timer_alloc_temps);
+    statecomp_t::init_tmp_mfabs();
+  }
 
   const CCTK_REAL saved_time = cctkGH->cctk_time;
   const CCTK_REAL old_time = cctkGH->cctk_time - dt;
+
+  static Timer timer_lincomb("ODESolvers::Solve::lincomb");
+  static Timer timer_rhs("ODESolvers::Solve::rhs");
+  static Timer timer_poststep("ODESolvers::Solve::poststep");
+
+  const auto copy_state = [](const auto &var) {
+    return var.copy(make_valid_int());
+  };
+  const auto calcrhs = [&](const int n) {
+    Interval interval_rhs(timer_rhs);
+    if (verbose)
+      CCTK_VINFO("Calculating RHS #%d at t=%g", n, double(cctkGH->cctk_time));
+    CallScheduleGroup(cctkGH, "ODESolvers_RHS");
+    rhs.check_valid(make_valid_int(),
+                    "ODESolvers after calling ODESolvers_RHS");
+  };
+  // t = t_0 + c
+  // var = a_0 * var + \Sum_i a_i * var_i
+  const auto calcupdate = [&](const int n, const CCTK_REAL c,
+                              const CCTK_REAL a0, const auto &as,
+                              const auto &vars) {
+    {
+      Interval interval_lincomb(timer_lincomb);
+      statecomp_t::lincomb(var, a0, as, vars, make_valid_int());
+      var.check_valid(make_valid_int(),
+                      "ODESolvers after defining new state vector");
+      mark_invalid(dep_groups);
+    }
+    {
+      Interval interval_poststep(timer_poststep);
+      *const_cast<CCTK_REAL *>(&cctkGH->cctk_time) = old_time + c;
+      CallScheduleGroup(cctkGH, "ODESolvers_PostStep");
+      if (verbose)
+        CCTK_VINFO("Calculated new state #%d at t=%g", n,
+                   double(cctkGH->cctk_time));
+    }
+  };
+
+  *const_cast<CCTK_REAL *>(&cctkGH->cctk_time) = old_time;
 
   if (CCTK_EQUALS(method, "constant")) {
 
@@ -736,18 +792,8 @@ extern "C" void ODESolvers_Solve(CCTK_ARGUMENTS) {
     // k1 = f(y0)
     // y1 = y0 + h k1
 
-    // Calculate first RHS
-    *const_cast<CCTK_REAL *>(&cctkGH->cctk_time) = old_time;
-    if (verbose)
-      CCTK_VINFO("Calculating RHS #1 at t=%g", double(cctkGH->cctk_time));
-    CallScheduleGroup(cctkGH, "ODESolvers_RHS");
-
-    // Add scaled RHS to state vector
-    statecomp_t::lincomb(var, 1, make_array(dt), make_array(&rhs),
-                         make_valid_int());
-    var.check_valid(make_valid_int(),
-                    "ODESolvers after defining new state vector");
-    mark_invalid(dep_groups);
+    calcrhs(1);
+    calcupdate(1, dt, 1.0, reals<1>{dt}, states<1>{&rhs});
 
   } else if (CCTK_EQUALS(method, "RK2")) {
 
@@ -755,39 +801,13 @@ extern "C" void ODESolvers_Solve(CCTK_ARGUMENTS) {
     // k2 = f(y0 + h/2 k1)
     // y1 = y0 + h k2
 
-    const auto old = var.copy(make_valid_int /*all*/ ());
-    *const_cast<CCTK_REAL *>(&cctkGH->cctk_time) = old_time;
+    const auto old = copy_state(var);
 
-    // Step 1
-    if (verbose)
-      CCTK_VINFO("Calculating RHS #1 at t=%g", double(cctkGH->cctk_time));
-    // rhs = RHS(var)
-    CallScheduleGroup(cctkGH, "ODESolvers_RHS");
+    calcrhs(1);
+    calcupdate(1, dt / 2, 1.0, reals<1>{dt / 2}, states<1>{&rhs});
 
-    // Add scaled RHS to state vector
-    // lincomb(dest, alpha, beta^i, src^i)
-    // dest = alpha * dest + beta^i * src^i
-    statecomp_t::lincomb(var, 1, make_array(dt / 2), make_array(&rhs),
-                         make_valid_int());
-    var.check_valid(make_valid_int(),
-                    "ODESolvers after defining new state vector");
-    mark_invalid(dep_groups);
-    *const_cast<CCTK_REAL *>(&cctkGH->cctk_time) = old_time + dt / 2;
-    // var = poststep(var)
-    CallScheduleGroup(cctkGH, "ODESolvers_PostStep");
-
-    // Step 2
-    if (verbose)
-      CCTK_VINFO("Calculating RHS #2 at t=%g", double(cctkGH->cctk_time));
-    // rhs = RHS(var)
-    CallScheduleGroup(cctkGH, "ODESolvers_RHS");
-
-    // Calculate new state vector
-    statecomp_t::lincomb(var, 0, make_array(CCTK_REAL(1), dt),
-                         make_array(&old, &rhs), make_valid_int());
-    var.check_valid(make_valid_int(),
-                    "ODESolvers after defining new state vector");
-    mark_invalid(dep_groups);
+    calcrhs(2);
+    calcupdate(2, dt, 0.0, reals<2>{1.0, dt}, states<2>{&old, &rhs});
 
   } else if (CCTK_EQUALS(method, "RK3")) {
 
@@ -796,56 +816,20 @@ extern "C" void ODESolvers_Solve(CCTK_ARGUMENTS) {
     // k3 = f(y0 - h k1 + 2 h k2)
     // y1 = y0 + h/6 k1 + 2/3 h k2 + h/6 k3
 
-    const auto old = var.copy(make_valid_int /*all*/ ());
-    *const_cast<CCTK_REAL *>(&cctkGH->cctk_time) = old_time;
+    const auto old = copy_state(var);
 
-    // Step 1
-    if (verbose)
-      CCTK_VINFO("Calculating RHS #1 at t=%g", double(cctkGH->cctk_time));
-    CallScheduleGroup(cctkGH, "ODESolvers_RHS");
-    const auto k1 = rhs.copy(make_valid_int());
+    calcrhs(1);
+    const auto k1 = copy_state(rhs);
+    calcupdate(1, dt / 2, 1.0, reals<1>{dt / 2}, states<1>{&k1});
 
-    // Step 2
+    calcrhs(2);
+    const auto k2 = copy_state(rhs);
+    calcupdate(2, dt, 0.0, reals<3>{1.0, -dt, 2 * dt},
+               states<3>{&old, &k1, &k2});
 
-    // Add scaled RHS to state vector
-    statecomp_t::lincomb(var, 1, make_array(dt / 2), make_array(&k1),
-                         make_valid_int());
-    var.check_valid(make_valid_int(),
-                    "ODESolvers after defining new state vector");
-    mark_invalid(dep_groups);
-    *const_cast<CCTK_REAL *>(&cctkGH->cctk_time) = old_time + dt / 2;
-    CallScheduleGroup(cctkGH, "ODESolvers_PostStep");
-
-    if (verbose)
-      CCTK_VINFO("Calculating RHS #2 at t=%g", double(cctkGH->cctk_time));
-    CallScheduleGroup(cctkGH, "ODESolvers_RHS");
-
-    const auto k2 = rhs.copy(make_valid_int());
-
-    // Step 3
-
-    // Add scaled RHS to state vector
-    statecomp_t::lincomb(var, 0, make_array(CCTK_REAL(1), -dt, 2 * dt),
-                         make_array(&old, &k1, &k2), make_valid_int());
-    var.check_valid(make_valid_int(),
-                    "ODESolvers after defining new state vector");
-    mark_invalid(dep_groups);
-    *const_cast<CCTK_REAL *>(&cctkGH->cctk_time) = old_time + dt;
-    CallScheduleGroup(cctkGH, "ODESolvers_PostStep");
-
-    if (verbose)
-      CCTK_VINFO("Calculating RHS #3 at t=%g", double(cctkGH->cctk_time));
-    CallScheduleGroup(cctkGH, "ODESolvers_RHS");
-
-    const auto &k3 = rhs;
-
-    // Calculate new state vector
-    statecomp_t::lincomb(var, 0,
-                         make_array(CCTK_REAL(1), dt / 6, 2 * dt / 3, dt / 6),
-                         make_array(&old, &k1, &k2, &k3), make_valid_int());
-    var.check_valid(make_valid_int(),
-                    "ODESolvers after defining new state vector");
-    mark_invalid(dep_groups);
+    calcrhs(3);
+    calcupdate(3, dt, 0.0, reals<4>{1.0, dt / 6, 2 * dt / 3, dt / 6},
+               states<4>{&old, &k1, &k2, &rhs});
 
   } else if (CCTK_EQUALS(method, "SSPRK3")) {
 
@@ -854,56 +838,20 @@ extern "C" void ODESolvers_Solve(CCTK_ARGUMENTS) {
     // k3 = f(y0 + h/4 k1 + h/4 k2)
     // y1 = y0 + h/6 k1 + h/6 k2 + 2/3 h k3
 
-    const auto old = var.copy(make_valid_int /*all*/ ());
-    *const_cast<CCTK_REAL *>(&cctkGH->cctk_time) = old_time;
+    const auto old = copy_state(var);
 
-    // Step 1
-    if (verbose)
-      CCTK_VINFO("Calculating RHS #1 at t=%g", double(cctkGH->cctk_time));
-    CallScheduleGroup(cctkGH, "ODESolvers_RHS");
-    const auto k1 = rhs.copy(make_valid_int());
+    calcrhs(1);
+    const auto k1 = copy_state(rhs);
+    calcupdate(1, dt, 1.0, reals<1>{dt}, states<1>{&k1});
 
-    // Step 2
+    calcrhs(2);
+    const auto k2 = copy_state(rhs);
+    calcupdate(2, dt / 2, 0.0, reals<3>{1.0, dt / 4, dt / 4},
+               states<3>{&old, &k1, &k2});
 
-    // Add scaled RHS to state vector
-    statecomp_t::lincomb(var, 1, make_array(dt), make_array(&k1),
-                         make_valid_int());
-    var.check_valid(make_valid_int(),
-                    "ODESolvers after defining new state vector");
-    mark_invalid(dep_groups);
-    *const_cast<CCTK_REAL *>(&cctkGH->cctk_time) = old_time + dt;
-    CallScheduleGroup(cctkGH, "ODESolvers_PostStep");
-
-    if (verbose)
-      CCTK_VINFO("Calculating RHS #2 at t=%g", double(cctkGH->cctk_time));
-    CallScheduleGroup(cctkGH, "ODESolvers_RHS");
-
-    const auto k2 = rhs.copy(make_valid_int());
-
-    // Step 3
-
-    // Add scaled RHS to state vector
-    statecomp_t::lincomb(var, 0, make_array(CCTK_REAL(1), dt / 4, dt / 4),
-                         make_array(&old, &k1, &k2), make_valid_int());
-    var.check_valid(make_valid_int(),
-                    "ODESolvers after defining new state vector");
-    mark_invalid(dep_groups);
-    *const_cast<CCTK_REAL *>(&cctkGH->cctk_time) = old_time + dt / 2;
-    CallScheduleGroup(cctkGH, "ODESolvers_PostStep");
-
-    if (verbose)
-      CCTK_VINFO("Calculating RHS #3 at t=%g", double(cctkGH->cctk_time));
-    CallScheduleGroup(cctkGH, "ODESolvers_RHS");
-
-    const auto &k3 = rhs;
-
-    // Calculate new state vector
-    statecomp_t::lincomb(var, 0,
-                         make_array(CCTK_REAL(1), dt / 6, dt / 6, 2 * dt / 3),
-                         make_array(&old, &k1, &k2, &k3), make_valid_int());
-    var.check_valid(make_valid_int(),
-                    "ODESolvers after defining new state vector");
-    mark_invalid(dep_groups);
+    calcrhs(3);
+    calcupdate(3, dt, 0.0, reals<4>{1.0, dt / 6, dt / 6, 2 * dt / 3},
+               states<4>{&old, &k1, &k2, &rhs});
 
   } else if (CCTK_EQUALS(method, "RK4")) {
 
@@ -913,82 +861,31 @@ extern "C" void ODESolvers_Solve(CCTK_ARGUMENTS) {
     // k4 = f(y0 + h k3)
     // y1 = y0 + h/6 k1 + h/3 k2 + h/3 k3 + h/6 k4
 
-    const auto old = var.copy(make_valid_int /*all*/ ());
-    *const_cast<CCTK_REAL *>(&cctkGH->cctk_time) = old_time;
+    const auto old = copy_state(var);
 
-    // Step 1
-    if (verbose)
-      CCTK_VINFO("Calculating RHS #1 at t=%g", double(cctkGH->cctk_time));
-    CallScheduleGroup(cctkGH, "ODESolvers_RHS");
-    rhs.check_valid(make_valid_int(),
-                    "ODESolvers after calling ODESolvers_RHS");
-    // const auto k1 = rhs.copy(make_valid_int());
-    const auto kaccum = rhs.copy(make_valid_int());
+    calcrhs(1);
+    const auto kaccum = copy_state(rhs);
+    calcupdate(1, dt / 2, 1.0, reals<1>{dt / 2}, states<1>{&kaccum});
 
-    // Step 2
+    calcrhs(2);
+    {
+      Interval interval_lincomb(timer_lincomb);
+      statecomp_t::lincomb(kaccum, 1.0, reals<1>{2.0}, states<1>{&rhs},
+                           make_valid_int());
+    }
+    calcupdate(2, dt / 2, 0.0, reals<2>{1.0, dt / 2}, states<2>{&old, &rhs});
 
-    // Add scaled RHS to state vector
-    statecomp_t::lincomb(var, 1, make_array(dt / 2), make_array(&rhs),
-                         make_valid_int());
-    var.check_valid(make_valid_int(),
-                    "ODESolvers after defining new state vector");
-    mark_invalid(dep_groups);
-    *const_cast<CCTK_REAL *>(&cctkGH->cctk_time) = old_time + dt / 2;
-    CallScheduleGroup(cctkGH, "ODESolvers_PostStep");
+    calcrhs(3);
+    {
+      Interval interval_lincomb(timer_lincomb);
+      statecomp_t::lincomb(kaccum, 1.0, reals<1>{2.0}, states<1>{&rhs},
+                           make_valid_int());
+    }
+    calcupdate(3, dt, 0.0, reals<2>{1.0, dt}, states<2>{&old, &rhs});
 
-    if (verbose)
-      CCTK_VINFO("Calculating RHS #2 at t=%g", double(cctkGH->cctk_time));
-    CallScheduleGroup(cctkGH, "ODESolvers_RHS");
-    rhs.check_valid(make_valid_int(),
-                    "ODESolvers after calling ODESolvers_RHS");
-    // const auto k2 = rhs.copy(make_valid_int());
-    statecomp_t::lincomb(kaccum, 1, make_array(CCTK_REAL(2)), make_array(&rhs),
-                         make_valid_int());
-
-    // Step 3
-
-    // Add scaled RHS to state vector
-    statecomp_t::lincomb(var, 0, make_array(CCTK_REAL(1), dt / 2),
-                         make_array(&old, &rhs), make_valid_int());
-    var.check_valid(make_valid_int(),
-                    "ODESolvers after defining new state vector");
-    mark_invalid(dep_groups);
-    *const_cast<CCTK_REAL *>(&cctkGH->cctk_time) = old_time + dt / 2;
-    CallScheduleGroup(cctkGH, "ODESolvers_PostStep");
-
-    if (verbose)
-      CCTK_VINFO("Calculating RHS #3 at t=%g", double(cctkGH->cctk_time));
-    CallScheduleGroup(cctkGH, "ODESolvers_RHS");
-    rhs.check_valid(make_valid_int(),
-                    "ODESolvers after calling ODESolvers_RHS");
-    // const auto k3 = rhs.copy(make_valid_int());
-    statecomp_t::lincomb(kaccum, 1, make_array(CCTK_REAL(2)), make_array(&rhs),
-                         make_valid_int());
-
-    // Step 4
-
-    // Add scaled RHS to state vector
-    statecomp_t::lincomb(var, 0, make_array(CCTK_REAL(1), dt),
-                         make_array(&old, &rhs), make_valid_int());
-    var.check_valid(make_valid_int(),
-                    "ODESolvers after defining new state vector");
-    mark_invalid(dep_groups);
-    *const_cast<CCTK_REAL *>(&cctkGH->cctk_time) = old_time + dt;
-    CallScheduleGroup(cctkGH, "ODESolvers_PostStep");
-
-    if (verbose)
-      CCTK_VINFO("Calculating RHS #4 at t=%g", double(cctkGH->cctk_time));
-    CallScheduleGroup(cctkGH, "ODESolvers_RHS");
-    rhs.check_valid(make_valid_int(),
-                    "ODESolvers after calling ODESolvers_RHS");
-    const auto &k4 = rhs;
-
-    // Calculate new state vector
-    statecomp_t::lincomb(var, 0, make_array(CCTK_REAL(1), dt / 6, dt / 6),
-                         make_array(&old, &kaccum, &k4), make_valid_int());
-    var.check_valid(make_valid_int(),
-                    "ODESolvers after defining new state vector");
-    mark_invalid(dep_groups);
+    calcrhs(4);
+    calcupdate(4, dt, 0.0, reals<3>{1.0, dt / 6, dt / 6},
+               states<3>{&old, &kaccum, &rhs});
 
   } else if (CCTK_EQUALS(method, "RKF78")) {
 
@@ -1051,39 +948,35 @@ extern "C" void ODESolvers_Solve(CCTK_ARGUMENTS) {
       assert(fabs(x - 1) <= 10 * numeric_limits<T>::epsilon());
     }
 
-    const auto old = var.copy(make_valid_int /*all*/ ());
+    const auto old = copy_state(var);
 
     vector<statecomp_t> ks;
     ks.reserve(nsteps);
     for (size_t step = 0; step < nsteps; ++step) {
-      const auto &c = get<0>(get<0>(tableau).at(step));
-      const auto &as = get<1>(get<0>(tableau).at(step));
-      // Set current time
-      *const_cast<CCTK_REAL *>(&cctkGH->cctk_time) = old_time + c * dt;
-      // Add scaled RHS to state vector
-      vector<CCTK_REAL> factors;
-      vector<const statecomp_t *> srcs;
-      factors.reserve(as.size() + 1);
-      srcs.reserve(as.size() + 1);
-      factors.push_back(1);
-      srcs.push_back(&old);
-      for (size_t i = 0; i < as.size(); ++i) {
-        if (as.at(i) != 0) {
-          factors.push_back(as.at(i) * dt);
-          srcs.push_back(&ks.at(i));
+      // Skip the first state vector calculation, it is always trivial
+      if (step > 0) {
+	const auto &c = get<0>(get<0>(tableau).at(step));
+	const auto &as = get<1>(get<0>(tableau).at(step));
+
+        // Add scaled RHS to state vector
+        vector<CCTK_REAL> factors;
+        vector<const statecomp_t *> srcs;
+        factors.reserve(as.size() + 1);
+        srcs.reserve(as.size() + 1);
+        factors.push_back(1.0);
+        srcs.push_back(&old);
+        for (size_t i = 0; i < as.size(); ++i) {
+          if (as.at(i) != 0) {
+            factors.push_back(as.at(i) * dt);
+            srcs.push_back(&ks.at(i));
+          }
         }
+        calcupdate(step, c * dt, 0.0, factors, srcs);
+        // TODO: Deallocate ks that are not needed any more
       }
-      statecomp_t::lincomb(var, 0, factors, srcs, make_valid_int());
-      var.check_valid(make_valid_int(),
-                      "ODESolvers after defining new state vector");
-      mark_invalid(dep_groups);
-      // TODO: Deallocate ks that are not needed any more
-      CallScheduleGroup(cctkGH, "ODESolvers_PostStep");
-      if (verbose)
-        CCTK_VINFO("Calculating RHS #%d at t=%g", int(step + 1),
-                   double(cctkGH->cctk_time));
-      CallScheduleGroup(cctkGH, "ODESolvers_RHS");
-      ks.push_back(rhs.copy(make_valid_int()));
+
+      calcrhs(step + 1);
+      ks.push_back(copy_state(rhs));
     }
 
     // Calculate new state vector
@@ -1100,10 +993,7 @@ extern "C" void ODESolvers_Solve(CCTK_ARGUMENTS) {
         srcs.push_back(&ks.at(i));
       }
     }
-    statecomp_t::lincomb(var, 0, factors, srcs, make_valid_int());
-    var.check_valid(make_valid_int(),
-                    "ODESolvers after defining new state vector");
-    mark_invalid(dep_groups);
+    calcupdate(nsteps, dt, 0.0, factors, srcs);
 
   } else if (CCTK_EQUALS(method, "DP87")) {
 
@@ -1168,41 +1058,37 @@ extern "C" void ODESolvers_Solve(CCTK_ARGUMENTS) {
       assert(fabs(x - 1) <= 10 * numeric_limits<T>::epsilon());
     }
 
-    const auto old = var.copy(make_valid_int /*all*/ ());
+    const auto old = copy_state(var);
 
     vector<statecomp_t> ks;
     ks.reserve(nsteps);
     for (size_t step = 0; step < nsteps; ++step) {
-      const auto &as = get<0>(tableau).at(step);
-      T c = 0;
-      for (const auto &a : as)
-        c += a;
-      // Set current time
-      *const_cast<CCTK_REAL *>(&cctkGH->cctk_time) = old_time + c * dt;
-      // Add scaled RHS to state vector
-      vector<CCTK_REAL> factors;
-      vector<const statecomp_t *> srcs;
-      factors.reserve(as.size() + 1);
-      srcs.reserve(as.size() + 1);
-      factors.push_back(1);
-      srcs.push_back(&old);
-      for (size_t i = 0; i < as.size(); ++i) {
-        if (as.at(i) != 0) {
-          factors.push_back(as.at(i) * dt);
-          srcs.push_back(&ks.at(i));
+      // Skip the first state vector calculation, it is always trivial
+      if (step > 0) {
+	const auto &as = get<0>(tableau).at(step);
+	T c = 0;
+	for (const auto &a : as)
+	  c += a;
+
+        // Add scaled RHS to state vector
+        vector<CCTK_REAL> factors;
+        vector<const statecomp_t *> srcs;
+        factors.reserve(as.size() + 1);
+        srcs.reserve(as.size() + 1);
+        factors.push_back(1.0);
+        srcs.push_back(&old);
+        for (size_t i = 0; i < as.size(); ++i) {
+          if (as.at(i) != 0) {
+            factors.push_back(as.at(i) * dt);
+            srcs.push_back(&ks.at(i));
+          }
         }
+        calcupdate(step, c * dt, 0.0, factors, srcs);
+        // TODO: Deallocate ks that are not needed any more
       }
-      statecomp_t::lincomb(var, 0, factors, srcs, make_valid_int());
-      var.check_valid(make_valid_int(),
-                      "ODESolvers after defining new state vector");
-      mark_invalid(dep_groups);
-      // TODO: Deallocate ks that are not needed any more
-      CallScheduleGroup(cctkGH, "ODESolvers_PostStep");
-      if (verbose)
-        CCTK_VINFO("Calculating RHS #%d at t=%g", int(step + 1),
-                   double(cctkGH->cctk_time));
-      CallScheduleGroup(cctkGH, "ODESolvers_RHS");
-      ks.push_back(rhs.copy(make_valid_int()));
+
+      calcrhs(step + 1);
+      ks.push_back(copy_state(rhs));
     }
 
     // Calculate new state vector
@@ -1219,10 +1105,7 @@ extern "C" void ODESolvers_Solve(CCTK_ARGUMENTS) {
         srcs.push_back(&ks.at(i));
       }
     }
-    statecomp_t::lincomb(var, 0, factors, srcs, make_valid_int());
-    var.check_valid(make_valid_int(),
-                    "ODESolvers after defining new state vector");
-    mark_invalid(dep_groups);
+    calcupdate(nsteps, dt, 0.0, factors, srcs);
 
   } else if (CCTK_EQUALS(method, "Implicit Euler")) {
 
@@ -1289,14 +1172,14 @@ extern "C" void ODESolvers_Solve(CCTK_ARGUMENTS) {
     assert(0);
   }
 
-  statecomp_t::free_tmp_mfabs();
+  {
+    static Timer timer_free_temps("ODESolvers::Solve::free_temps");
+    Interval interval_free_temps(timer_free_temps);
+    statecomp_t::free_tmp_mfabs();
+  }
 
   // Reset current time
   *const_cast<CCTK_REAL *>(&cctkGH->cctk_time) = saved_time;
-  // Apply last boundary conditions
-  CallScheduleGroup(cctkGH, "ODESolvers_PostStep");
-  if (verbose)
-    CCTK_VINFO("Calculated new state at t=%g", double(cctkGH->cctk_time));
 
   // TODO: Update time here, and not during time level cycling in the driver
 }
