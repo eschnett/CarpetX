@@ -1217,6 +1217,10 @@ void prolongate_3d_rf2<
           const vect<int, dim> icrse = ifine >> 1;
           const vect<int, dim> off = ifine & 0x1;
 
+          const auto pcrse = [&](const int di, const int dj, const int dk) {
+            return crse(icrse[0] + di, icrse[1] + dj, icrse[2] + dk);
+          };
+
           // Choose stencil shift
           vect<int, dim> shift{0, 0, 0};
           constexpr bool any_use_shift = any(use_shift);
@@ -1260,9 +1264,7 @@ void prolongate_3d_rf2<
                         const CCTK_REAL dd =
                             undivided_difference_1d<CENTI, INTPI, ORDERI>()(
                                 [&](const int di) {
-                                  return crse(icrse[0] + si + di,
-                                              icrse[1] + sj + dj,
-                                              icrse[2] + sk + dk);
+                                  return pcrse(si + di, sj + dj, sk + dk);
                                 });
                         ddx = fmax(ddx, fabs(dd));
                       }
@@ -1279,9 +1281,7 @@ void prolongate_3d_rf2<
                         const CCTK_REAL dd =
                             undivided_difference_1d<CENTJ, INTPJ, ORDERJ>()(
                                 [&](const int dj) {
-                                  return crse(icrse[0] + si + di,
-                                              icrse[1] + sj + dj,
-                                              icrse[2] + sk + dk);
+                                  return pcrse(si + di, sj + dj, sk + dk);
                                 });
                         ddy = fmax(ddy, fabs(dd));
                       }
@@ -1298,9 +1298,7 @@ void prolongate_3d_rf2<
                         const CCTK_REAL dd =
                             undivided_difference_1d<CENTK, INTPK, ORDERK>()(
                                 [&](const int dk) {
-                                  return crse(icrse[0] + si + di,
-                                              icrse[1] + sj + dj,
-                                              icrse[2] + sk + dk);
+                                  return pcrse(si + di, sj + dj, sk + dk);
                                 });
                         ddz = fmax(ddz, fabs(dd));
                       }
@@ -1322,9 +1320,7 @@ void prolongate_3d_rf2<
           } // if any_use_shift
 
           const CCTK_REAL val = call_stencil_3d(
-              [&](const int di, const int dj, const int dk) {
-                return crse(icrse[0] + di, icrse[1] + dj, icrse[2] + dk);
-              },
+              pcrse,
               [&](const auto &crse) {
                 return interp1d<CENTI, INTPI, ORDERI>()(crse, shift[0], off[0]);
               },
@@ -1356,9 +1352,7 @@ void prolongate_3d_rf2<
             constexpr int LINORDERK =
                 INTPK == CONS || INTPK == ENO ? 1 : ORDERK;
             const CCTK_REAL val_lin = call_stencil_3d(
-                [&](const int di, const int dj, const int dk) {
-                  return crse(icrse[0] + di, icrse[1] + dj, icrse[2] + dk);
-                },
+                pcrse,
                 [&](const auto &crse) {
                   return interp1d<CENTI, INTPI, LINORDERI>()(crse, 0, off[0]);
                 },
@@ -1388,77 +1382,124 @@ void prolongate_3d_rf2<
                 for (int dj = sradj[0]; dj <= sradj[1]; ++dj) {
                   for (int di = sradi[0]; di <= sradi[1]; ++di) {
                     using std::fmax, std::fmin;
-                    minval = fmin(minval, crse(icrse[0] + di, icrse[1] + dj,
-                                               icrse[2] + dk));
-                    maxval = fmax(maxval, crse(icrse[0] + di, icrse[1] + dj,
-                                               icrse[2] + dk));
+                    minval = fmin(minval, pcrse(di, dj, dk));
+                    maxval = fmax(maxval, pcrse(di, dj, dk));
                   }
                 }
               }
               need_fallback |= val < minval || val > maxval;
 
               // Fallback condition 2 (checked for every direction in
-              // which the operator is conservative): The slope of the
-              // values at the stencil points changes sign anywhere in
-              // the stencil
+              // which the operator is conservative): The slope or
+              // curvature of the values at the stencil points changes
+              // sign anywhere in the stencil
 
               if constexpr (INTPI == CONS || INTPI == ENO) {
-                bool need_fallback_i = false;
-                for (int dk = sradk[0]; dk <= sradk[1]; ++dk) {
-                  for (int dj = sradj[0]; dj <= sradj[1]; ++dj) {
-                    const CCTK_REAL s0 =
-                        crse(icrse[0] + 1, icrse[1] + dj, icrse[2] + dk) -
-                        crse(icrse[0] + 0, icrse[1] + dj, icrse[2] + dk);
-                    for (int di = sradi[0] + 2; di <= sradi[1]; ++di) {
-                      const CCTK_REAL s =
-                          crse(icrse[0] + di, icrse[1] + dj, icrse[2] + dk) -
-                          crse(icrse[0] + (di - 1), icrse[1] + dj,
-                               icrse[2] + dk);
-                      need_fallback_i |= s * s0 < 0;
+                if (false && sradi[1] - sradi[0] >= 2) {
+                  // Check whether slopes change sign
+                  for (int dk = sradk[0]; dk <= sradk[1]; ++dk) {
+                    for (int dj = sradj[0]; dj <= sradj[1]; ++dj) {
+                      const int di = sradi[0];
+                      const CCTK_REAL s0 =
+                          pcrse(di + 1, dj, dk) - pcrse(di + 0, dj, dk);
+                      for (int di = sradi[0] + 1; di <= sradi[1] - 1; ++di) {
+                        const CCTK_REAL s =
+                            pcrse(di + 1, dj, dk) - pcrse(di + 0, dj, dk);
+                        need_fallback |= s * s0 < 0;
+                      }
                     }
                   }
                 }
-                need_fallback |= need_fallback_i;
+                if (sradi[1] - sradi[0] >= 3) {
+                  // Check whether curvatures change sign
+                  for (int dk = sradk[0]; dk <= sradk[1]; ++dk) {
+                    for (int dj = sradj[0]; dj <= sradj[1]; ++dj) {
+                      const int di = sradi[0];
+                      const CCTK_REAL c0 = pcrse(di + 0, dj, dk) -
+                                           2 * pcrse(di + 1, dj, dk) +
+                                           pcrse(di + 2, dj, dk);
+                      for (int di = sradi[0] + 1; di <= sradi[1] - 2; ++di) {
+                        const CCTK_REAL c = pcrse(di + 0, dj, dk) -
+                                            2 * pcrse(di + 1, dj, dk) +
+                                            pcrse(di + 2, dj, dk);
+                        need_fallback |= c * c0 < 0;
+                      }
+                    }
+                  }
+                }
               }
 
               if constexpr (INTPJ == CONS || INTPJ == ENO) {
-                bool need_fallback_j = false;
-                for (int dk = sradk[0]; dk <= sradk[1]; ++dk) {
-                  for (int di = sradi[0]; di <= sradi[1]; ++di) {
-                    const CCTK_REAL s0 =
-                        crse(icrse[0] + di, icrse[1] + 1, icrse[2] + dk) -
-                        crse(icrse[0] + di, icrse[1] + 0, icrse[2] + dk);
-                    for (int dj = sradj[0] + 2; dj <= sradj[1]; ++dj) {
-                      const CCTK_REAL s =
-                          crse(icrse[0] + di, icrse[1] + dj, icrse[2] + dk) -
-                          crse(icrse[0] + di, icrse[1] + (dj - 1),
-                               icrse[2] + dk);
-                      need_fallback_j |= s * s0 < 0;
+                if (false && sradj[1] - sradj[0] >= 2) {
+                  // Check whether slopes change sign
+                  for (int dk = sradk[0]; dk <= sradk[1]; ++dk) {
+                    for (int di = sradi[0]; di <= sradi[1]; ++di) {
+                      const int dj = sradj[0];
+                      const CCTK_REAL s0 =
+                          pcrse(di, dj + 1, dk) - pcrse(di, dj + 0, dk);
+                      for (int dj = sradj[0] + 1; dj <= sradj[1] - 1; ++dj) {
+                        const CCTK_REAL s =
+                            pcrse(di, dj + 1, dk) - pcrse(di, dj + 0, dk);
+                        need_fallback |= s * s0 < 0;
+                      }
                     }
                   }
                 }
-                need_fallback |= need_fallback_j;
+                if (sradj[1] - sradj[0] >= 3) {
+                  // Check whether curvatures change sign
+                  for (int dk = sradk[0]; dk <= sradk[1]; ++dk) {
+                    for (int di = sradi[0]; di <= sradi[1]; ++di) {
+                      const int dj = sradj[0];
+                      const CCTK_REAL c0 = pcrse(di, dj + 0, dk) -
+                                           2 * pcrse(di, dj + 1, dk) +
+                                           pcrse(di, dj + 2, dk);
+                      for (int dj = sradj[0] + 1; dj <= sradj[1] - 2; ++dj) {
+                        const CCTK_REAL c = pcrse(di, dj + 0, dk) -
+                                            2 * pcrse(di, dj + 1, dk) +
+                                            pcrse(di, dj + 2, dk);
+                        need_fallback |= c * c0 < 0;
+                      }
+                    }
+                  }
+                }
               }
 
               if constexpr (INTPK == CONS || INTPK == ENO) {
-                bool need_fallback_k = false;
-                for (int dj = sradj[0]; dj <= sradj[1]; ++dj) {
-                  for (int di = sradi[0]; di <= sradi[1]; ++di) {
-                    const CCTK_REAL s0 =
-                        crse(icrse[0] + di, icrse[1] + dj, icrse[2] + 1) -
-                        crse(icrse[0] + di, icrse[1] + dj, icrse[2] + 0);
-                    for (int dk = sradk[0] + 2; dk <= sradk[1]; ++dk) {
-                      const CCTK_REAL s =
-                          crse(icrse[0] + di, icrse[1] + dj, icrse[2] + dk) -
-                          crse(icrse[0] + di, icrse[1] + dj,
-                               icrse[2] + (dk - 1));
-                      need_fallback_k |= s * s0 < 0;
+                if (false && sradk[1] - sradk[0] >= 2) {
+                  // Check whether slopes change sign
+                  for (int dj = sradj[0]; dj <= sradj[1]; ++dj) {
+                    for (int di = sradi[0]; di <= sradi[1]; ++di) {
+                      const int dk = sradk[0];
+                      const CCTK_REAL s0 =
+                          pcrse(di, dj, dk + 1) - pcrse(di, dj, dk + 0);
+                      for (int dk = sradk[0] + 1; dk <= sradk[1] - 1; ++dk) {
+                        const CCTK_REAL s =
+                            pcrse(di, dj, dk + 1) - pcrse(di, dj, dk + 0);
+                        need_fallback |= s * s0 < 0;
+                      }
                     }
                   }
                 }
-                need_fallback |= need_fallback_k;
+                if (sradk[1] - sradk[0] >= 3) {
+                  // Check whether curvatures change sign
+                  for (int dj = sradj[0]; dj <= sradj[1]; ++dj) {
+                    for (int di = sradi[0]; di <= sradi[1]; ++di) {
+                      const int dk = sradk[0];
+                      const CCTK_REAL c0 = pcrse(di, dj, dk + 0) -
+                                           2 * pcrse(di, dj, dk + 1) +
+                                           pcrse(di, dj, dk + 2);
+                      for (int dk = sradk[0] + 1; dk <= sradk[1] - 2; ++dk) {
+                        const CCTK_REAL c = pcrse(di, dj, dk + 0) -
+                                            2 * pcrse(di, dj, dk + 1) +
+                                            pcrse(di, dj, dk + 2);
+                        need_fallback |= c * c0 < 0;
+                      }
+                    }
+                  }
+                }
               }
             }
+
             res = need_fallback ? val_lin : val;
           } // if FB != FB_NONE
 
@@ -1647,6 +1688,11 @@ void prolongate_3d_rf2<
         const vect<int, dim> icrse = ifine >> 1;
         const vect<int, dim> off = ifine & 0x1;
 
+        const auto pcrse = [&](const int di, const int dj, const int dk,
+                               const int comp) {
+          return crse(icrse[0] + di, icrse[1] + dj, icrse[2] + dk, comp);
+        };
+
         // Choose stencil shift
         vect<int, dim> shift{0, 0, 0};
         constexpr bool any_use_shift = any(use_shift);
@@ -1691,9 +1737,7 @@ void prolongate_3d_rf2<
                         const CCTK_REAL dd =
                             undivided_difference_1d<CENTI, INTPI, ORDERI>()(
                                 [&](const int di) {
-                                  return crse(icrse[0] + si + di,
-                                              icrse[1] + sj + dj,
-                                              icrse[2] + sk + dk, comp);
+                                  return pcrse(si + di, sj + dj, sk + dk, comp);
                                 });
                         ddx = fmax(ddx, fabs(dd));
                       }
@@ -1712,9 +1756,7 @@ void prolongate_3d_rf2<
                         const CCTK_REAL dd =
                             undivided_difference_1d<CENTJ, INTPJ, ORDERJ>()(
                                 [&](const int dj) {
-                                  return crse(icrse[0] + si + di,
-                                              icrse[1] + sj + dj,
-                                              icrse[2] + sk + dk, comp);
+                                  return pcrse(si + di, sj + dj, sk + dk, comp);
                                 });
                         ddy = fmax(ddy, fabs(dd));
                       }
@@ -1733,9 +1775,7 @@ void prolongate_3d_rf2<
                         const CCTK_REAL dd =
                             undivided_difference_1d<CENTK, INTPK, ORDERK>()(
                                 [&](const int dk) {
-                                  return crse(icrse[0] + si + di,
-                                              icrse[1] + sj + dj,
-                                              icrse[2] + sk + dk, comp);
+                                  return pcrse(si + di, sj + dj, sk + dk, comp);
                                 });
                         ddz = fmax(ddz, fabs(dd));
                       }
@@ -1761,7 +1801,7 @@ void prolongate_3d_rf2<
         for (int comp = 0; comp < ncomps; ++comp)
           vals[comp] = call_stencil_3d(
               [&](const int di, const int dj, const int dk) {
-                return crse(icrse[0] + di, icrse[1] + dj, icrse[2] + dk, comp);
+                return pcrse(di, dj, dk, comp);
               },
               [&](const auto &crse) {
                 return interp1d<CENTI, INTPI, ORDERI>()(crse, shift[0], off[0]);
@@ -1775,15 +1815,19 @@ void prolongate_3d_rf2<
 
         std::array<CCTK_REAL, maxncomps> ress;
 
-        if constexpr (FB == FB_NONE || ((INTPI != CONS || ORDERI <= 1) &&
-                                        (INTPJ != CONS || ORDERJ <= 1) &&
-                                        (INTPK != CONS || ORDERK <= 1))) {
+        if constexpr (FB == FB_NONE ||
+                      (((INTPI != CONS && INTPI != ENO) || ORDERI <= 1) &&
+                       ((INTPJ != CONS && INTPJ != ENO) || ORDERJ <= 1) &&
+                       ((INTPK != CONS && INTPK != ENO) || ORDERK <= 1))) {
+          // We are not falling back to linear interpolation
 
           for (int comp = 0; comp < ncomps; ++comp)
             ress[comp] = vals[comp];
 
         } else {
+          // We might want to fall back to linear interpolation
 
+          // Check whether we need to fall back
           bool need_fallback = false;
           {
             const std::array<int, 2> sradi =
@@ -1795,124 +1839,153 @@ void prolongate_3d_rf2<
             const std::array<int, 2> sradk =
                 interp1d<CENTK, INTPK, ORDERK>().stencil_radius(shift[2],
                                                                 off[2]);
-            CCTK_REAL minval = +1 / CCTK_REAL(0), maxval = -1 / CCTK_REAL(0);
+            // Fallback condition 1: The interpolated value introduces a new
+            // extremum
             for (int comp = 0; comp < ncomps; ++comp) {
+              CCTK_REAL minval = +1 / CCTK_REAL(0), maxval = -1 / CCTK_REAL(0);
               for (int dk = sradk[0]; dk <= sradk[1]; ++dk) {
                 for (int dj = sradj[0]; dj <= sradj[1]; ++dj) {
                   for (int di = sradi[0]; di <= sradi[1]; ++di) {
                     using std::fmax, std::fmin;
-                    minval = fmin(minval, crse(icrse[0] + di, icrse[1] + dj,
-                                               icrse[2] + dk, comp));
-                    maxval = fmax(maxval, crse(icrse[0] + di, icrse[1] + dj,
-                                               icrse[2] + dk, comp));
+                    minval = fmin(minval, pcrse(di, dj, dk, comp));
+                    maxval = fmax(maxval, pcrse(di, dj, dk, comp));
                   }
                 }
               }
               need_fallback |= vals[comp] < minval || vals[comp] > maxval;
             }
 
-            if constexpr (INTPI == CONS) {
-              bool need_fallback_i = false;
-              for (int comp = 0; comp < ncomps; ++comp) {
-                for (int dk = sradk[0]; dk <= sradk[1]; ++dk) {
+            // Fallback condition 2 (checked for every direction in
+            // which the operator is conservative): The slope or
+            // curvature of the values at the stencil points changes
+            // sign anywhere in the stencil
+
+            if constexpr (INTPI == CONS || INTPI == ENO) {
+              if (false && sradi[1] - sradi[0] >= 2) {
+                // Check whether slopes change sign
+                for (int comp = 0; comp < ncomps; ++comp) {
+                  for (int dk = sradk[0]; dk <= sradk[1]; ++dk) {
+                    for (int dj = sradj[0]; dj <= sradj[1]; ++dj) {
+                      const int di = sradi[0];
+                      const CCTK_REAL s0 = pcrse(di + 1, dj, dk, comp) -
+                                           pcrse(di + 0, dj, dk, comp);
+                      for (int di = sradi[0] + 1; di <= sradi[1] - 1; ++di) {
+                        const CCTK_REAL s = pcrse(di + 1, dj, dk, comp) -
+                                            pcrse(di + 0, dj, dk, comp);
+                        need_fallback |= s * s0 < 0;
+                      }
+                    }
+                  }
+                }
+              }
+              if (sradi[1] - sradi[0] >= 3) {
+                // Check whether curvatures change sign
+                for (int comp = 0; comp < ncomps; ++comp) {
+                  for (int dk = sradk[0]; dk <= sradk[1]; ++dk) {
+                    for (int dj = sradj[0]; dj <= sradj[1]; ++dj) {
+                      const int di = sradi[0];
+                      const CCTK_REAL c0 = pcrse(di + 0, dj, dk, comp) -
+                                           2 * pcrse(di + 1, dj, dk, comp) +
+                                           pcrse(di + 2, dj, dk, comp);
+                      for (int di = sradi[0] + 1; di <= sradi[1] - 2; ++di) {
+                        const CCTK_REAL c = pcrse(di + 0, dj, dk, comp) -
+                                            2 * pcrse(di + 1, dj, dk, comp) +
+                                            pcrse(di + 2, dj, dk, comp);
+                        need_fallback |= c * c0 < 0;
+                      }
+                    }
+                  }
+                }
+              }
+            }
+
+            if constexpr (INTPJ == CONS || INTPJ == ENO) {
+              if (false && sradj[1] - sradj[0] >= 2) {
+                // Check whether slopes change sign
+                for (int comp = 0; comp < ncomps; ++comp) {
+                  for (int dk = sradk[0]; dk <= sradk[1]; ++dk) {
+                    for (int di = sradi[0]; di <= sradi[1]; ++di) {
+                      const int dj = sradj[0];
+                      const CCTK_REAL s0 = pcrse(di, dj + 1, dk, comp) -
+                                           pcrse(di, dj + 0, dk, comp);
+                      for (int dj = sradj[0] + 1; dj <= sradj[1] - 1; ++dj) {
+                        const CCTK_REAL s = pcrse(di, dj + 1, dk, comp) -
+                                            pcrse(di, dj + 0, dk, comp);
+                        need_fallback |= s * s0 < 0;
+                      }
+                    }
+                  }
+                }
+              }
+              if (sradj[1] - sradj[0] >= 3) {
+                // Check whether curvatures change sign
+                for (int comp = 0; comp < ncomps; ++comp) {
+                  for (int dk = sradk[0]; dk <= sradk[1]; ++dk) {
+                    for (int di = sradi[0]; di <= sradi[1]; ++di) {
+                      const int dj = sradj[0];
+                      const CCTK_REAL c0 = pcrse(di, dj + 0, dk, comp) -
+                                           2 * pcrse(di, dj + 1, dk, comp) +
+                                           pcrse(di, dj + 2, dk, comp);
+                      for (int dj = sradj[0] + 1; dj <= sradj[1] - 2; ++dj) {
+                        const CCTK_REAL c = pcrse(di, dj + 0, dk, comp) -
+                                            2 * pcrse(di, dj + 1, dk, comp) +
+                                            pcrse(di, dj + 2, dk, comp);
+                        need_fallback |= c * c0 < 0;
+                      }
+                    }
+                  }
+                }
+              }
+            }
+
+            if constexpr (INTPK == CONS || INTPK == ENO) {
+              if (false && sradk[1] - sradk[0] >= 2) {
+                // Check whether slopes change sign
+                for (int comp = 0; comp < ncomps; ++comp) {
                   for (int dj = sradj[0]; dj <= sradj[1]; ++dj) {
-                    // using std::signbit;
-                    // const bool s0 = signbit(
-                    //     crse(icrse[0] + 1, icrse[1] + dj, icrse[2] + dk) -
-                    //     crse(icrse[0] + 0, icrse[1] + dj, icrse[2] + dk));
-                    const CCTK_REAL s0 =
-                        crse(icrse[0] + 1, icrse[1] + dj, icrse[2] + dk, comp) -
-                        crse(icrse[0] + 0, icrse[1] + dj, icrse[2] + dk, comp);
-                    for (int di = sradi[0] + 2; di <= sradi[1]; ++di) {
-                      // const bool s = signbit(
-                      //     crse(icrse[0] + di, icrse[1] + dj, icrse[2] + dk) -
-                      //     crse(icrse[0] + (di - 1), icrse[1] + dj,
-                      //          icrse[2] + dk));
-                      // need_fallback_i |= s != s0;
-                      const CCTK_REAL s =
-                          crse(icrse[0] + di, icrse[1] + dj, icrse[2] + dk,
-                               comp) -
-                          crse(icrse[0] + (di - 1), icrse[1] + dj,
-                               icrse[2] + dk, comp);
-                      need_fallback_i |= s * s0 < 0;
+                    for (int di = sradi[0]; di <= sradi[1]; ++di) {
+                      const int dk = sradk[0];
+                      const CCTK_REAL s0 = pcrse(di, dj, dk + 1, comp) -
+                                           pcrse(di, dj, dk + 0, comp);
+                      for (int dk = sradk[0] + 1; dk <= sradk[1] - 1; ++dk) {
+                        const CCTK_REAL s = pcrse(di, dj, dk + 1, comp) -
+                                            pcrse(di, dj, dk + 0, comp);
+                        need_fallback |= s * s0 < 0;
+                      }
                     }
                   }
                 }
-                need_fallback |= need_fallback_i;
               }
-            }
-
-            if constexpr (INTPJ == CONS) {
-              bool need_fallback_j = false;
-              for (int comp = 0; comp < ncomps; ++comp) {
-                for (int dk = sradk[0]; dk <= sradk[1]; ++dk) {
-                  for (int di = sradi[0]; di <= sradi[1]; ++di) {
-                    // using std::signbit;
-                    // const bool s0 = signbit(
-                    //     crse(icrse[0] + di, icrse[1] + 1, icrse[2] + dk) -
-                    //     crse(icrse[0] + di, icrse[1] + 0, icrse[2] + dk));
-                    const CCTK_REAL s0 =
-                        crse(icrse[0] + di, icrse[1] + 1, icrse[2] + dk, comp) -
-                        crse(icrse[0] + di, icrse[1] + 0, icrse[2] + dk, comp);
-                    for (int dj = sradj[0] + 2; dj <= sradj[1]; ++dj) {
-                      // const bool s = signbit(
-                      //     crse(icrse[0] + di, icrse[1] + dj, icrse[2] + dk) -
-                      //     crse(icrse[0] + di, icrse[1] + (dj - 1),
-                      //          icrse[2] + dk));
-                      // need_fallback_j |= s != s0;
-                      const CCTK_REAL s =
-                          crse(icrse[0] + di, icrse[1] + dj, icrse[2] + dk,
-                               comp) -
-                          crse(icrse[0] + di, icrse[1] + (dj - 1),
-                               icrse[2] + dk, comp);
-                      need_fallback_j |= s * s0 < 0;
+              if (sradk[1] - sradk[0] >= 3) {
+                // Check whether curvatures change sign
+                for (int comp = 0; comp < ncomps; ++comp) {
+                  for (int dj = sradj[0]; dj <= sradj[1]; ++dj) {
+                    for (int di = sradi[0]; di <= sradi[1]; ++di) {
+                      const int dk = sradk[0];
+                      const CCTK_REAL c0 = pcrse(di, dj, dk + 0, comp) -
+                                           2 * pcrse(di, dj, dk + 1, comp) +
+                                           pcrse(di, dj, dk + 2, comp);
+                      for (int dk = sradk[0] + 1; dk <= sradk[1] - 2; ++dk) {
+                        const CCTK_REAL c = pcrse(di, dj, dk + 0, comp) -
+                                            2 * pcrse(di, dj, dk + 1, comp) +
+                                            pcrse(di, dj, dk + 2, comp);
+                        need_fallback |= c * c0 < 0;
+                      }
                     }
                   }
                 }
-                need_fallback |= need_fallback_j;
-              }
-            }
-
-            if constexpr (INTPK == CONS) {
-              bool need_fallback_k = false;
-              for (int comp = 0; comp < ncomps; ++comp) {
-                for (int dj = sradj[0]; dj <= sradj[1]; ++dj) {
-                  for (int di = sradi[0]; di <= sradi[1]; ++di) {
-                    // using std::signbit;
-                    // const bool s0 = signbit(
-                    //     crse(icrse[0] + di, icrse[1] + dj, icrse[2] + 1) -
-                    //     crse(icrse[0] + di, icrse[1] + dj, icrse[2] + 0));
-                    const CCTK_REAL s0 =
-                        crse(icrse[0] + di, icrse[1] + dj, icrse[2] + 1, comp) -
-                        crse(icrse[0] + di, icrse[1] + dj, icrse[2] + 0, comp);
-                    for (int dk = sradk[0] + 2; dk <= sradk[1]; ++dk) {
-                      // const bool s = signbit(
-                      //     crse(icrse[0] + di, icrse[1] + dj, icrse[2] + dk) -
-                      //     crse(icrse[0] + di, icrse[1] + dj,
-                      //          icrse[2] + (dk - 1)));
-                      // need_fallback_k |= s != s0;
-                      const CCTK_REAL s = crse(icrse[0] + di, icrse[1] + dj,
-                                               icrse[2] + dk, comp) -
-                                          crse(icrse[0] + di, icrse[1] + dj,
-                                               icrse[2] + (dk - 1), comp);
-                      need_fallback_k |= s * s0 < 0;
-                    }
-                  }
-                }
-                need_fallback |= need_fallback_k;
               }
             }
           }
 
-          constexpr int LINORDERI = INTPI == CONS ? 1 : ORDERI;
-          constexpr int LINORDERJ = INTPJ == CONS ? 1 : ORDERJ;
-          constexpr int LINORDERK = INTPK == CONS ? 1 : ORDERK;
+          constexpr int LINORDERI = INTPI == CONS || INTPI == ENO ? 1 : ORDERI;
+          constexpr int LINORDERJ = INTPJ == CONS || INTPJ == ENO ? 1 : ORDERJ;
+          constexpr int LINORDERK = INTPK == CONS || INTPK == ENO ? 1 : ORDERK;
           std::array<CCTK_REAL, maxncomps> val_lins;
           for (int comp = 0; comp < ncomps; ++comp) {
             val_lins[comp] = call_stencil_3d(
                 [&](const int di, const int dj, const int dk) {
-                  return crse(icrse[0] + di, icrse[1] + dj, icrse[2] + dk,
-                              comp);
+                  return pcrse(di, dj, dk, comp);
                 },
                 [&](const auto &crse) {
                   return interp1d<CENTI, INTPI, LINORDERI>()(crse, 0, off[0]);
