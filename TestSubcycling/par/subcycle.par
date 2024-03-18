@@ -17,9 +17,20 @@ CarpetX::periodic_x = yes
 CarpetX::periodic_y = yes
 CarpetX::periodic_z = yes
 
-Cactus::cctk_itlast = 4
+CarpetX::max_grid_size_x = 10000000
+CarpetX::max_grid_size_y = 10000000
+CarpetX::max_grid_size_z = 10000000
+
+CarpetX::max_tile_size_x = 10000000
+CarpetX::max_tile_size_y = 10000000
+CarpetX::max_tile_size_z = 10000000
+
+CarpetX::dtfac = 16.0
+
+Cactus::cctk_itlast = 8
 
 CarpetX::use_subcycling_wip = yes
+CarpetX::restrict_during_sync = no
 
 ErrorEstimator::region_shape = "cube"
 ErrorEstimator::scale_by_resolution = "yes"
