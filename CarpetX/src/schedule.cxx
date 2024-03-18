@@ -1455,8 +1455,6 @@ void CycleTimelevels(cGH *restrict const cctkGH) {
   static Timer timer("CycleTimelevels");
   Interval interval(timer);
 
-  cctkGH->cctk_iteration += 1;
-  cctkGH->cctk_time += cctkGH->cctk_delta_time;
   update_cctkGHs(cctkGH);
 
   // TODO: Parallelize over groups
@@ -1674,6 +1672,8 @@ int Evolve(tFleshConfig *config) {
       for (const auto &leveldata : patchdata.leveldata)
         iteration = min(iteration, leveldata.iteration);
 
+    cctkGH->cctk_iteration += 1;
+
     // Loop over all levels, in batches that combine levels that don't
     // subcycle. The level range is [min_level, max_level).
     for (int min_level = 0, max_level = min_level + 1 ;
@@ -1694,13 +1694,16 @@ int Evolve(tFleshConfig *config) {
       // Skip this batch of levels if it is not active at the current
       // iteration
       rat64 level_iteration = -1;
+      rat64 level_delta_iteration = -1;
       for (const auto &patchdata : ghext->patchdata) {
         if (min_level < int(patchdata.leveldata.size())) {
           level_iteration = patchdata.leveldata.at(min_level).iteration;
+          level_delta_iteration = patchdata.leveldata.at(min_level).delta_iteration;
           break;
         }
       }
       assert(level_iteration != -1);
+      assert(level_delta_iteration != -1);
       // TODO: if a break is always ok (eg if subcycling factors are strange
       // or if a for() loop with a continue is required.
       if (level_iteration > iteration)
@@ -1711,8 +1714,11 @@ int Evolve(tFleshConfig *config) {
       active_levels = make_optional<active_levels_t>(min_level, max_level);
 
       // Advance iteration number on this batch of levels
+      level_iteration += level_delta_iteration;
       active_levels->loop_serially([&](auto &restrict leveldata) {
         leveldata.iteration += leveldata.delta_iteration;
+        assert(level_iteration == leveldata.iteration);
+        assert(level_delta_iteration == leveldata.delta_iteration);
       });
 
       // We cannot invalidate all non-evolved variables. ODESolvers
@@ -1721,6 +1727,8 @@ int Evolve(tFleshConfig *config) {
       // InvalidateTimelevels(cctkGH);
 
       CycleTimelevels(cctkGH);
+
+      cctkGH->cctk_time = cctkGH->cctk_delta_time * double(level_iteration);
 
       CCTK_Traverse(cctkGH, "CCTK_PRESTEP");
       CCTK_Traverse(cctkGH, "CCTK_EVOL");
