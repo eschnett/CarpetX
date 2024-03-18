@@ -3,4 +3,4 @@ implements: TestSubcycling
 
 USES INCLUDE HEADER: loop.hxx
 
-CCTK_REAL iteration TYPE=GF CENTERING={VVV} TAGS="checkpoint='no'" "subcycling and prolongation test"
+CCTK_REAL iteration TYPE=GF CENTERING={VVV} TAGS="checkpoint='yes'" "subcycling and prolongation test"
