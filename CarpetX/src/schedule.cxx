@@ -84,6 +84,7 @@ optional<active_levels_t> active_levels;
 void Reflux(const cGH *cctkGH, int level);
 void Restrict(const cGH *cctkGH, int level, const vector<int> &groups);
 void Restrict(const cGH *cctkGH, int level);
+void SyncAfterRestrict(const cGH *cctkGH, int level);
 
 namespace {
 // Convert a (direction, face) pair to an AMReX Orientation
@@ -1676,9 +1677,9 @@ int Evolve(tFleshConfig *config) {
 
     // Loop over all levels, in batches that combine levels that don't
     // subcycle. The level range is [min_level, max_level).
-    for (int min_level = 0, max_level = min_level + 1 ;
-           min_level < ghext->num_levels() ;
-           min_level = max_level, max_level = min_level + 1) {
+    for (int min_level = 0, max_level = min_level + 1;
+         min_level < ghext->num_levels();
+         min_level = max_level, max_level = min_level + 1) {
       // Find end of batch
       while (max_level < ghext->num_levels()) {
         bool level_is_subcycling_level = false;
@@ -1698,7 +1699,8 @@ int Evolve(tFleshConfig *config) {
       for (const auto &patchdata : ghext->patchdata) {
         if (min_level < int(patchdata.leveldata.size())) {
           level_iteration = patchdata.leveldata.at(min_level).iteration;
-          level_delta_iteration = patchdata.leveldata.at(min_level).delta_iteration;
+          level_delta_iteration =
+              patchdata.leveldata.at(min_level).delta_iteration;
           break;
         }
       }
@@ -1741,12 +1743,35 @@ int Evolve(tFleshConfig *config) {
 
       if (!restrict_during_sync) {
         // Restrict
-        // TODO: These loop bounds are wrong for subcycling
-        for (int level = ghext->num_levels() - 2; level >= 0; --level)
-          Restrict(cctkGH, level);
+        for (int level = min_level - 1; level >= 0; --level) {
+          rat64 coarse_iteration =
+              ghext->patchdata.at(0).leveldata.at(level).iteration;
+          if (coarse_iteration == level_iteration)
+            Restrict(cctkGH, level);
+          else
+            break;
+        }
+        // Prolongation
+        for (int level = 1; level < max_level; ++level) {
+          rat64 coarse_iteration =
+              ghext->patchdata.at(0).leveldata.at(level - 1).iteration;
+          if (coarse_iteration == level_iteration)
+            SyncAfterRestrict(cctkGH, level);
+          else
+            continue;
+        }
         CCTK_Traverse(cctkGH, "CCTK_POSTRESTRICT");
       }
 
+      for (int level = min_level - 1; level >= 0; --level) {
+        rat64 coarse_iteration =
+            ghext->patchdata.at(0).leveldata.at(level).iteration;
+        if (coarse_iteration == level_iteration)
+          min_level = level;
+        else
+          break;
+      }
+      active_levels = make_optional<active_levels_t>(min_level, max_level);
       CCTK_Traverse(cctkGH, "CCTK_POSTSTEP");
       CCTK_Traverse(cctkGH, "CCTK_CHECKPOINT");
       CCTK_Traverse(cctkGH, "CCTK_ANALYSIS");
@@ -2764,6 +2789,27 @@ void Restrict(const cGH *cctkGH, int level) {
     }
   }
   Restrict(cctkGH, level, groups);
+}
+
+void SyncAfterRestrict(const cGH *cctkGH, int level) {
+  const int numgroups = CCTK_NumGroups();
+  vector<int> groups;
+  groups.reserve(numgroups);
+  const auto &patchdata0 = ghext->patchdata.at(0);
+  const auto &leveldata0 = patchdata0.leveldata.at(0);
+  for (const auto &groupdataptr : leveldata0.groupdata) {
+    // Restrict only grid functions
+    if (groupdataptr) {
+      auto &restrict groupdata = *groupdataptr;
+      // Restrict only evolved grid functions
+      if (groupdata.do_checkpoint)
+        groups.push_back(groupdata.groupindex);
+    }
+  }
+  auto active_levels_bk = active_levels;
+  active_levels = make_optional<active_levels_t>(level - 1, level + 1);
+  SyncGroupsByDirI(cctkGH, groups.size(), groups.data(), nullptr);
+  active_levels = active_levels_bk;
 }
 
 // storage handling
