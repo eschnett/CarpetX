@@ -1326,7 +1326,7 @@ int Initialise(tFleshConfig *config) {
   CCTK_VINFO("Initialized %d levels", ghext->num_levels());
 
   assert(!active_levels);
-  active_levels = make_optional<active_levels_t>();
+  active_levels = make_optional<active_levels_t>(0, ghext->num_levels());
 
   if (!restrict_during_sync) {
     // Restrict
