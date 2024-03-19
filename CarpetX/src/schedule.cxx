@@ -1335,6 +1335,11 @@ int Initialise(tFleshConfig *config) {
       if (leveldata.level != ghext->num_levels() - 1)
         Restrict(cctkGH, leveldata.level);
     });
+    // Prolongation
+    active_levels->loop_coarse_to_fine([&](const auto &leveldata) {
+      if (leveldata.level != 0)
+        SyncAfterRestrict(cctkGH, leveldata.level);
+    });
     CCTK_Traverse(cctkGH, "CCTK_POSTRESTRICT");
   }
 
