@@ -1735,7 +1735,10 @@ int Evolve(tFleshConfig *config) {
 
       CycleTimelevels(cctkGH);
 
-      cctkGH->cctk_time = cctkGH->cctk_delta_time * double(level_iteration);
+      cctkGH->cctk_time =
+          (use_subcycling_wip)
+              ? cctkGH->cctk_delta_time * double(level_iteration)
+              : cctkGH->cctk_time + cctkGH->cctk_delta_time;
 
       CCTK_Traverse(cctkGH, "CCTK_PRESTEP");
       CCTK_Traverse(cctkGH, "CCTK_EVOL");
