@@ -94,9 +94,14 @@ public:
               if_else(NI == 0, 0, if_else(NI < 0, bnd_min1, bnd_max1 - 1));
           const vect<int, dim> BI =
               vect<int, dim>(I == bnd_max1 - 1) - vect<int, dim>(I == bnd_min1);
+          const vect<int, dim> BI1 =
+              vect<int, dim>(I == bnd_max1 - 2) - vect<int, dim>(I == bnd_min1+1);
+          const vect<int, dim> BI2 =
+              vect<int, dim>(I == bnd_max1 - 3) - vect<int, dim>(I == bnd_min1+2);
+
           for (int iter = 0; iter < N; ++iter) {
             const PointDesc p =
-                point_desc({CI, CJ, CK}, I, iter, NI, I0, BI, bnd_min1,
+                point_desc({CI, CJ, CK}, I, iter, NI, I0, BI, BI1, BI2, bnd_min1,
                            bnd_max1, loop_min1, loop_max1);
             f(p);
           }

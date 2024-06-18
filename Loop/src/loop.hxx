@@ -71,6 +71,8 @@ struct PointDesc {
   vect<int, dim> I0; // nearest interior point
   // outward boundary normal (if on outermost interior point), else zero
   vect<int, dim> BI;
+  vect<int, dim> BI1;
+  vect<int, dim> BI2;
 
   // outer boundary points for this grid function (might be outside the current
   // grid function component)
@@ -98,11 +100,12 @@ struct PointDesc {
   PointDesc(const int level, const int patch, const int component,
             const vect<int, dim> &I, const int iter, const vect<int, dim> &NI,
             const vect<int, dim> &I0, const vect<int, dim> &BI,
+            const vect<int, dim> &BI1, const vect<int, dim> &BI2,
             const vect<int, dim> &bnd_min, const vect<int, dim> &bnd_max,
             const vect<int, dim> &loop_min, const vect<int, dim> &loop_max,
             const vect<CCTK_REAL, dim> &X, const vect<CCTK_REAL, dim> &DX)
       : level(level), patch(patch), component(component), I(I), iter(iter),
-        NI(NI), I0(I0), BI(BI), bnd_min(bnd_min), bnd_max(bnd_max),
+        NI(NI), I0(I0), BI(BI), BI1(BI1), BI2(BI2), bnd_min(bnd_min), bnd_max(bnd_max),
         loop_min(loop_min), loop_max(loop_max), X(X), DX(DX),
         mask(Arith::mask_for_loop_tail<CCTK_BOOLVEC>(I[0], loop_max[0])),
         imin(loop_min[0]), imax(loop_max[0]), i(I[0]), j(I[1]), k(I[2]),
@@ -143,13 +146,13 @@ public:
   CCTK_ATTRIBUTE_ALWAYS_INLINE CCTK_DEVICE CCTK_HOST PointDesc
   point_desc(const vect<bool, dim> &CI, const vect<int, dim> &I, const int iter,
              const vect<int, dim> &NI, const vect<int, dim> &I0,
-             const vect<int, dim> &BI, const vect<int, dim> &bnd_min,
-             const vect<int, dim> &bnd_max, const vect<int, dim> &loop_min,
-             const vect<int, dim> &loop_max) const {
+             const vect<int, dim> &BI, const vect<int, dim> &BI1, const vect<int, dim> &BI2, 
+             const vect<int, dim> &bnd_min, const vect<int, dim> &bnd_max, 
+             const vect<int, dim> &loop_min, const vect<int, dim> &loop_max) const {
     const vect<CCTK_REAL, dim> X =
         x0 + (lbnd + I - vect<CCTK_REAL, dim>(!CI) / 2) * dx;
     const vect<CCTK_REAL, dim> DX = dx;
-    return PointDesc(level, patch, component, I, iter, NI, I0, BI, bnd_min,
+    return PointDesc(level, patch, component, I, iter, NI, I0, BI, BI1, BI2, bnd_min,
                      bnd_max, loop_min, loop_max, X, DX);
   }
 
@@ -184,8 +187,11 @@ public:
             // Outward boundary normal (if on outermost interior point), else 0
             const vect<int, dim> BI =
                 vect<int, dim>(I == bnd_max - 1) - vect<int, dim>(I == bnd_min);
+            const vect<int, dim> BI1 = vect<int, dim>(I == bnd_max - 2) - vect<int, dim>(I == bnd_min + 1);
+            const vect<int, dim> BI2 = vect<int, dim>(I == bnd_max - 3) - vect<int, dim>(I == bnd_min + 2);
+ 
             const PointDesc p =
-                point_desc({CI, CJ, CK}, I, iter, NI, I0, BI, bnd_min, bnd_max,
+                point_desc({CI, CJ, CK}, I, iter, NI, I0, BI, BI1, BI2, bnd_min, bnd_max,
                            loop_min, loop_max);
             f(p);
           }
