@@ -535,8 +535,8 @@ extern "C" void CarpetX_Interpolate(const CCTK_POINTER_TO_CONST cctkGH_,
 
   // Send particles to interpolation points
   for (auto &container : containers) {
-    const int patch = int(&container - containers.data());
 #ifdef CCTK_DEBUG
+    const int patch = int(&container - containers.data());
     std::size_t old_nparticles = 0;
     std::set<int> oldids;
     {
