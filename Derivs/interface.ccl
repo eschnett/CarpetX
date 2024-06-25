@@ -3,6 +3,7 @@
 IMPLEMENTS: Derivs
 
 INCLUDES HEADER: derivs.hxx IN derivs.hxx
+INCLUDES HEADER: derivs_spacetimex.hxx IN derivs_spacetimex.hxx
 
 USES INCLUDE HEADER: defs.hxx
 USES INCLUDE HEADER: div.hxx
