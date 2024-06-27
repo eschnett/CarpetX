@@ -237,7 +237,7 @@ void poison_invalid_ga(const int gi, const int vi, const int tl) {
   if (!valid.valid_int) {
     int dimension = arraygroupdata.dimension;
     CCTK_REAL *restrict const ptr =
-        const_cast<CCTK_REAL *>(&arraygroupdata.data.at(tl).at(vi));
+        const_cast<CCTK_REAL *>(arraygroupdata.data.at(tl).dataPtr(vi));
     const int *gsh = arraygroupdata.gsh;
     int n_elems = 1;
     for (int i = 0; i < dimension; i++)
@@ -486,7 +486,8 @@ void check_valid_ga(const int gi, const int vi, const int tl,
   assert(valid.valid_outer && valid.valid_ghosts);
 
   if (valid.valid_int) {
-    const CCTK_REAL *restrict const ptr = &arraygroupdata.data.at(tl).at(vi);
+    const CCTK_REAL *restrict const ptr =
+        arraygroupdata.data.at(tl).dataPtr(vi);
     int dimension = arraygroupdata.dimension;
     const int *gsh = arraygroupdata.gsh;
     int n_elems = 1;

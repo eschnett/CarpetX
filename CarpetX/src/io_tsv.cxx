@@ -158,7 +158,7 @@ void WriteTSVScalars(const cGH *restrict cctkGH, const string &filename,
   file << cctkGH->cctk_iteration << sep << cctkGH->cctk_time;
   const int tl = 0;
   for (int vi = 0; vi < arraygroupdata.numvars; ++vi)
-    file << sep << arraygroupdata.data.at(tl).at(vi);
+    file << sep << *arraygroupdata.data.at(tl).dataPtr(vi);
   file << "\n";
 }
 
@@ -207,7 +207,7 @@ void WriteTSVArrays(const cGH *restrict cctkGH, const string &filename,
       file << sep << (dir == out_dir ? i : 0);
     const int tl = 0;
     for (int vi = 0; vi < arraygroupdata.numvars; ++vi)
-      file << sep << arraygroupdata.data.at(tl).at(np * vi + DI[out_dir] * i);
+      file << sep << arraygroupdata.data.at(tl).dataPtr(vi)[DI[out_dir] * i];
     file << "\n";
   }
 }

@@ -1131,8 +1131,7 @@ void carpetx_openpmd_t::InputOpenPMD(const cGH *const cctkGH,
         assert(cactus_dk > 0);
         assert(cactus_np > 0);
         for (int vi = 0; vi < numvars; ++vi) {
-          CCTK_REAL *const cactus_var_ptr =
-              groupdata.data.at(tl).data() + vi * cactus_np;
+          CCTK_REAL *const cactus_var_ptr = groupdata.data.at(tl).dataPtr(vi);
           if (input_ghosts || intbox == extbox) {
 #if OPENPMDAPI_VERSION_GE(0, 15, 0)
             record_components.at(vi).loadChunkRaw(cactus_var_ptr, start, count);
@@ -1747,8 +1746,7 @@ void carpetx_openpmd_t::OutputOpenPMD(const cGH *const cctkGH,
         assert(cactus_dk > 0);
         assert(cactus_np > 0);
         for (int vi = 0; vi < numvars; ++vi) {
-          const CCTK_REAL *const var_ptr =
-              groupdata.data.at(tl).data() + vi * cactus_np;
+          const CCTK_REAL *const var_ptr = groupdata.data.at(tl).dataPtr(vi);
           if (output_ghosts || intbox == extbox) {
             const CCTK_REAL *const ptr = var_ptr;
 #if OPENPMDAPI_VERSION_GE(0, 15, 0)

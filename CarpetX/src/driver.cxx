@@ -1684,9 +1684,10 @@ void SetupGlobals() {
     arraygroupdata.data.resize(group.numtimelevels);
     arraygroupdata.valid.resize(group.numtimelevels);
     for (int tl = 0; tl < int(arraygroupdata.data.size()); ++tl) {
-      // TODO: Allocate in managed memory
-      arraygroupdata.data.at(tl).resize(arraygroupdata.numvars *
-                                        arraygroupdata.array_size);
+      arraygroupdata.data.at(tl).resize(
+          amrex::Box(amrex::IntVect(arraygroupdata.lbnd),
+                     amrex::IntVect(arraygroupdata.ubnd)),
+          arraygroupdata.numvars);
       why_valid_t why([]() { return "SetupGlobals"; });
       arraygroupdata.valid.at(tl).resize(arraygroupdata.numvars, why);
       for (int vi = 0; vi < arraygroupdata.numvars; ++vi) {
@@ -2167,7 +2168,14 @@ operator<<(YAML::Emitter &yaml,
   yaml << YAML::BeginMap;
   yaml << YAML::Key << "commongroupdata" << YAML::Value
        << (GHExt::CommonGroupData)arraygroupdata;
-  yaml << YAML::Key << "data" << YAML::Value << arraygroupdata.data;
+  yaml << YAML::Key << "data" << YAML::Value << YAML::Flow << YAML::BeginSeq;
+  for (int tl = 0; tl < int(arraygroupdata.data.size()); ++tl) {
+    yaml << YAML::BeginSeq;
+    for (int vi = 0; vi < arraygroupdata.numvars; ++vi)
+      yaml << *arraygroupdata.data.at(tl).dataPtr(vi);
+    yaml << YAML::EndSeq;
+  }
+  yaml << YAML::EndSeq;
   yaml << YAML::EndMap;
   return yaml;
 }

@@ -14,6 +14,7 @@
 #include <AMReX_FluxRegister.H>
 #include <AMReX_Interpolater.H>
 #include <AMReX_MultiFab.H>
+#include <AMReX_FArrayBox.H>
 
 #include <yaml-cpp/yaml.h>
 
@@ -158,8 +159,7 @@ struct GHExt {
     // we assume that grid scalars only hold "analysis" data.
 
     struct ArrayGroupData : public CommonGroupData {
-      vector<vector<CCTK_REAL> >
-          data; // [time level][var index + grid point index]
+      vector<amrex::FArrayBox> data; // [time level]
       int array_size;
       int dimension;
       int activetimelevels;
